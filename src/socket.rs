@@ -91,12 +91,61 @@ pub enum SocketError {
     CannotBind,
 }
 
-pub fn socket_v4(interface_addr: Option<Ipv4Addr>) -> Result<UdpSocket, SocketError> {
-    // Make sure we bind to a specific interface if specified
-    let bind_addr = match interface_addr {
-        Some(addr) => SocketAddrV4::new(addr, MDNS_PORT).into(),
-        None => SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT).into(),
-    };
+/// Create a send-only socket for a specific interface.
+/// This socket is bound to an ephemeral port on the interface for sending only.
+pub fn socket_v4_send_only(interface_addr: Ipv4Addr) -> Result<UdpSocket, SocketError> {
+    // Bind to the specific interface with ephemeral port for sending
+    let bind_addr = SocketAddrV4::new(interface_addr, 0).into();
+
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).map_err(|source| {
+        SocketError::NewSocket {
+            domain: IP::Ipv4,
+            source,
+        }
+    })?;
+    socket
+        .set_reuse_address(true)
+        .map_err(|source| SocketError::ReuseAddress {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    socket
+        .bind(&bind_addr)
+        .map_err(|source| SocketError::Bind {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    socket
+        .set_multicast_loop_v4(true)
+        .map_err(|source| SocketError::SetMulticastLoop {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    socket
+        .set_multicast_ttl_v4(16)
+        .map_err(|source| SocketError::MulticastTtl {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|source| SocketError::SetNonBlocking {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    UdpSocket::from_std(std::net::UdpSocket::from(socket)).map_err(|source| {
+        SocketError::UdpSocket {
+            domain: IP::Ipv4,
+            source,
+        }
+    })
+}
+
+/// Create a receive socket that joins multicast on multiple interfaces.
+pub fn socket_v4_multiinterface(interfaces: &[Ipv4Addr]) -> Result<UdpSocket, SocketError> {
+    // CRITICAL: Always bind to 0.0.0.0:5353 for receiving multicast packets.
+    // This allows the socket to receive multicast from ANY interface.
+    let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT).into();
 
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).map_err(|source| {
         SocketError::NewSocket {
@@ -130,11 +179,88 @@ pub fn socket_v4(interface_addr: Option<Ipv4Addr>) -> Result<UdpSocket, SocketEr
             source,
         })?;
 
-    // Join multicast group once on the default interface.
-    // Due to IP_MULTICAST_ALL (enabled by default on most systems),
-    // this socket will receive multicast packets from ALL interfaces,
-    // not just the default one. This simplifies multi-interface support
-    // for receiving, though sending still requires per-interface sockets.
+    // Join multicast group on ALL specified interfaces
+    if interfaces.is_empty() {
+        // No specific interfaces - join on default
+        socket
+            .join_multicast_v4(&MDNS_IPV4, &Ipv4Addr::UNSPECIFIED)
+            .map_err(|source| SocketError::JoinMulticast {
+                domain: IP::Ipv4,
+                source,
+            })?;
+        tracing::debug!("Joined multicast on default interface");
+    } else {
+        // Join on each specified interface
+        for interface_addr in interfaces {
+            socket
+                .join_multicast_v4(&MDNS_IPV4, interface_addr)
+                .map_err(|source| SocketError::JoinMulticast {
+                    domain: IP::Ipv4,
+                    source,
+                })?;
+            tracing::info!("Joined multicast group 224.0.0.251 on interface {}", interface_addr);
+        }
+    }
+
+    socket
+        .set_multicast_ttl_v4(16)
+        .map_err(|source| SocketError::MulticastTtl {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    socket
+        .set_nonblocking(true)
+        .map_err(|source| SocketError::SetNonBlocking {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    UdpSocket::from_std(std::net::UdpSocket::from(socket)).map_err(|source| {
+        SocketError::UdpSocket {
+            domain: IP::Ipv4,
+            source,
+        }
+    })
+}
+
+pub fn socket_v4(interface_addr: Option<Ipv4Addr>) -> Result<UdpSocket, SocketError> {
+    // Always bind to 0.0.0.0:5353 for receiving multicast packets.
+    let bind_addr = SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, MDNS_PORT).into();
+
+    let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)).map_err(|source| {
+        SocketError::NewSocket {
+            domain: IP::Ipv4,
+            source,
+        }
+    })?;
+    socket
+        .set_reuse_address(true)
+        .map_err(|source| SocketError::ReuseAddress {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    #[cfg(unix)]
+    socket
+        .set_reuse_port(true)
+        .map_err(|source| SocketError::ReusePort {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    socket
+        .bind(&bind_addr)
+        .map_err(|source| SocketError::Bind {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    socket
+        .set_multicast_loop_v4(true)
+        .map_err(|source| SocketError::SetMulticastLoop {
+            domain: IP::Ipv4,
+            source,
+        })?;
+
+    // Join multicast group on the specified interface (or default if None).
+    // Since we bound to 0.0.0.0:5353, this socket will properly receive multicast
+    // packets from ALL sources on this interface, not just loopback traffic.
     socket
         .join_multicast_v4(&MDNS_IPV4, &interface_addr.unwrap_or(Ipv4Addr::UNSPECIFIED))
         .map_err(|source| SocketError::JoinMulticast {
@@ -226,16 +352,25 @@ pub struct Sockets {
 
 impl Sockets {
     pub fn new(class: IpClass, multicast_interfaces: Vec<Ipv4Addr>) -> Result<Self, SocketError> {
-        // Create interface-specific sockets for multi-interface mode
+        // Create one shared receive socket that joins multicast on all interfaces
+        let v4_socket = if class.has_v4() || matches!(class, IpClass::Auto) {
+            // Create socket that joins multicast on all specified interfaces
+            let socket = socket_v4_multiinterface(&multicast_interfaces)?;
+            Some(Arc::new(socket))
+        } else {
+            None
+        };
+
+        // Create interface specific sockets for sending only
         let mut interface_sockets_v4 = HashMap::new();
         for addr in &multicast_interfaces {
-            match socket_v4(Some(*addr)) {
+            match socket_v4_send_only(*addr) {
                 Ok(socket) => {
-                    tracing::debug!("Created interface-specific socket for {}", addr);
+                    tracing::debug!("Created send-only socket for interface {}", addr);
                     interface_sockets_v4.insert(*addr, Arc::new(socket));
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to create interface socket for {}: {}", addr, e);
+                    tracing::warn!("Failed to create send socket for interface {}: {}", addr, e);
                 }
             }
         }
@@ -244,7 +379,7 @@ impl Sockets {
         match class {
             IpClass::Auto => {
                 let socket = Self {
-                    v4: socket_v4(None).ok().map(Arc::new),
+                    v4: v4_socket,
                     v6: socket_v6().ok().map(Arc::new),
                     interface_sockets_v4: interface_sockets_v4.clone(),
                 };
@@ -254,10 +389,7 @@ impl Sockets {
                 Ok(socket)
             }
             _ => Ok(Self {
-                v4: class
-                    .has_v4()
-                    .then(|| socket_v4(None).map(Arc::new))
-                    .transpose()?,
+                v4: v4_socket,
                 v6: class
                     .has_v6()
                     .then(|| socket_v6().map(Arc::new))
@@ -319,6 +451,7 @@ impl Sockets {
     }
 
     /// Get the socket for a specific IPv4 interface
+    #[allow(dead_code)]
     pub fn get_interface_socket_v4(&self, addr: Ipv4Addr) -> Option<Arc<UdpSocket>> {
         let interfaces = self.interface_sockets_v4.read().unwrap();
         match interfaces.get(&addr) {
@@ -328,6 +461,7 @@ impl Sockets {
     }
 
     /// Get all interface addresses that have sockets
+    #[allow(dead_code)]
     pub fn get_all_interface_addresses_v4(&self) -> Vec<Ipv4Addr> {
         let interfaces = self.interface_sockets_v4.read().unwrap();
         interfaces.keys().copied().collect()
