@@ -9,6 +9,9 @@
   };
 
   outputs = { self, nixpkgs, rust-overlay, flake-utils, crate2nix, ... }:
+    let
+      linuxSystems = [ "x86_64-linux" "aarch64-linux" ];
+    in
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -20,9 +23,22 @@
           inherit pkgs;
           release = true;
         });
+
+        testNode = pkgs.rustPlatform.buildRustPackage {
+          pname = "swarm-discovery-test-node";
+          version = "0.1.0";
+          src = pkgs.lib.cleanSource ./.;
+          cargoRoot = "tests/nixos/test-node";
+          cargoLock.lockFile = ./tests/nixos/test-node/Cargo.lock;
+          buildAndTestSubdir = "tests/nixos/test-node";
+          doCheck = false;
+        };
       in
       {
-        packages.default = cargoNix.rootCrate.build;
+        packages = {
+          default = cargoNix.rootCrate.build;
+          test-node = testNode;
+        };
 
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
@@ -30,6 +46,11 @@
             rust-analyzer
             crate2nix.packages.${system}.default
           ];
+        };
+      } // pkgs.lib.optionalAttrs (builtins.elem system linuxSystems) {
+        checks.multicast-discovery = import ./tests/nixos/vm-test.nix {
+          inherit pkgs;
+          inherit testNode;
         };
       }
     );
