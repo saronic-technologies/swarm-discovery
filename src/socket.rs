@@ -75,6 +75,12 @@ pub enum SocketError {
         #[source]
         source: std::io::Error,
     },
+    #[error("{domain}: error setting the multicast interface")]
+    SetMulticastIf {
+        domain: IP,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{domain}: error setting the socket to non-blocking mode")]
     SetNonBlocking {
         domain: IP,
@@ -119,6 +125,12 @@ pub fn socket_v4_tx(interface_addr: Ipv4Addr) -> Result<UdpSocket, SocketError> 
     socket
         .set_multicast_loop_v4(true)
         .map_err(|source| SocketError::SetMulticastLoop {
+            domain: IP::Ipv4,
+            source,
+        })?;
+    socket
+        .set_multicast_if_v4(&interface_addr)
+        .map_err(|source| SocketError::SetMulticastIf {
             domain: IP::Ipv4,
             source,
         })?;
