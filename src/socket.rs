@@ -498,7 +498,7 @@ impl Sockets {
         let interfaces = self.interface_sockets_v4.read().unwrap().clone();
         for (ifindex, socket) in interfaces.iter() {
             if let Err(e) = socket.send_to(bytes, (MDNS_IPV4, MDNS_PORT)).await {
-                tracing::error!("error sending mDNS on interface index {}: {}", ifindex, e);
+                tracing::warn!("error sending mDNS on interface index {}: {}", ifindex, e);
             } else {
                 tracing::debug!(
                     ifindex = ifindex,
