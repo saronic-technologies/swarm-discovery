@@ -2,12 +2,12 @@ use crate::IpClass;
 use hickory_proto::op::Message;
 use socket2::{Domain, InterfaceIndexOrAddress, Protocol, SockRef, Socket, Type};
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
-use tokio::net::UdpSocket;
+use tokio::{net::UdpSocket, sync::watch};
 
 pub const MDNS_PORT: u16 = 5353;
 pub const MDNS_IPV4: Ipv4Addr = Ipv4Addr::new(224, 0, 0, 251);
@@ -344,6 +344,11 @@ pub struct Sockets {
     v4: Option<Arc<UdpSocket>>,
     v6: Option<Arc<UdpSocket>>,
     interface_sockets_v4: Arc<RwLock<HashMap<u32, Arc<UdpSocket>>>>,
+    /// Publishes the set of interface indices that currently have a live
+    /// per-interface TX socket (i.e. the interfaces we actively advertise
+    /// on). Updated on every successful add/remove; failed additions never
+    /// appear here.
+    interfaces_v4_tx: Arc<watch::Sender<BTreeSet<u32>>>,
 }
 
 impl Sockets {
@@ -374,6 +379,9 @@ impl Sockets {
                 }
             }
         }
+        let interfaces_v4_tx = Arc::new(watch::Sender::new(
+            interface_sockets_v4.keys().copied().collect(),
+        ));
         let interface_sockets_v4 = Arc::new(RwLock::new(interface_sockets_v4));
 
         match class {
@@ -382,6 +390,7 @@ impl Sockets {
                     v4: v4_socket,
                     v6: socket_v6().ok().map(Arc::new),
                     interface_sockets_v4: interface_sockets_v4.clone(),
+                    interfaces_v4_tx,
                 };
                 if socket.v4.is_none() && socket.v6.is_none() {
                     return Err(SocketError::CannotBind);
@@ -395,8 +404,18 @@ impl Sockets {
                     .then(|| socket_v6().map(Arc::new))
                     .transpose()?,
                 interface_sockets_v4: interface_sockets_v4.clone(),
+                interfaces_v4_tx,
             }),
         }
+    }
+
+    /// Subscribe to the set of interface indices that currently have live
+    /// per-interface IPv4 multicast sockets.
+    ///
+    /// An empty set means per-interface multicast is not in use (traffic
+    /// flows via the OS default interface only).
+    pub fn subscribe_interfaces_v4(&self) -> watch::Receiver<BTreeSet<u32>> {
+        self.interfaces_v4_tx.subscribe()
     }
 
     pub fn v4(&self) -> Option<Arc<UdpSocket>> {
@@ -422,6 +441,8 @@ impl Sockets {
         self.join_multicast_v4(ifindex)?;
 
         interfaces.insert(ifindex, Arc::new(socket));
+        self.interfaces_v4_tx
+            .send_replace(interfaces.keys().copied().collect());
         tracing::info!("Added interface index {} for multicast", ifindex);
         Ok(())
     }
@@ -435,6 +456,8 @@ impl Sockets {
             // Leave multicast while still holding the lock to prevent a concurrent
             // add_interface_v4 from re-joining before we finish leaving.
             self.leave_multicast_v4(ifindex);
+            self.interfaces_v4_tx
+                .send_replace(interfaces.keys().copied().collect());
 
             tracing::info!("Removed interface index {} from multicast", ifindex);
 
@@ -541,12 +564,30 @@ impl Sockets {
         // Join multicast on the shared RX socket so we receive packets on this interface
         if let Some(v4) = &self.v4 {
             let sock_ref = SockRef::from(v4.as_ref());
-            sock_ref
-                .join_multicast_v4_n(&MDNS_IPV4, &InterfaceIndexOrAddress::Index(ifindex))
-                .map_err(|source| SocketError::JoinMulticast {
-                    domain: IP::Ipv4,
-                    source,
-                })?;
+            match sock_ref.join_multicast_v4_n(&MDNS_IPV4, &InterfaceIndexOrAddress::Index(ifindex))
+            {
+                Ok(()) => {}
+                // The RX socket may already be a member of the group on this
+                // interface: with no interfaces configured up front, creation
+                // does a best-effort join on the OS default interface, which
+                // the OS resolves to a concrete one. Re-joining that
+                // interface explicitly reports EADDRINUSE even though the
+                // membership we want exists — without this, the interface
+                // carrying the default route is the one interface that can
+                // never be added for per-interface multicast.
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    tracing::debug!(
+                        "multicast group already joined on interface index {}",
+                        ifindex
+                    );
+                }
+                Err(source) => {
+                    return Err(SocketError::JoinMulticast {
+                        domain: IP::Ipv4,
+                        source,
+                    });
+                }
+            }
         }
 
         Ok(())

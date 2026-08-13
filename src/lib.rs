@@ -11,14 +11,14 @@ use acto::{AcTokio, ActoHandle, ActoRef, ActoRuntime, SupervisionRef, TokioJoinH
 use hickory_proto::rr::Name;
 use socket::{SocketError, Sockets};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Display,
     net::IpAddr,
     str::FromStr,
     time::{Duration, Instant},
 };
 use thiserror::Error;
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, sync::watch};
 
 type Callback = Box<dyn FnMut(&str, &Peer) + Send + 'static>;
 
@@ -389,6 +389,7 @@ impl Discoverer {
     pub fn spawn(self, handle: &Handle) -> Result<DropGuard, SpawnError> {
         let _entered = handle.enter();
         let sockets = Sockets::new(self.class, self.multicast_interfaces.clone())?;
+        let interfaces_v4 = sockets.subscribe_interfaces_v4();
         tracing::trace!(?sockets, "created new sockets");
 
         let service_name = Name::from_str(&format!("_{}.{}.local.", self.name, self.protocol))
@@ -417,6 +418,7 @@ impl Discoverer {
         Ok(DropGuard {
             task: Some(handle),
             aref: me,
+            interfaces_v4,
             _rt: rt,
         })
     }
@@ -429,6 +431,7 @@ impl Discoverer {
 pub struct DropGuard {
     task: Option<TokioJoinHandle<()>>,
     aref: ActoRef<guardian::Input>,
+    interfaces_v4: watch::Receiver<BTreeSet<u32>>,
     _rt: AcTokio,
 }
 
@@ -500,6 +503,33 @@ impl DropGuard {
     /// Note: This only affects IPv4. IPv6 multicast always uses the default interface.
     pub fn remove_interface_v4(&self, ifindex: u32) {
         self.aref.send(guardian::Input::RemoveInterface(ifindex));
+    }
+
+    /// Returns the set of interface indices the discovery service is
+    /// actively advertising on via per-interface IPv4 multicast.
+    ///
+    /// Unlike the requests made through
+    /// [`add_interface_v4`](DropGuard::add_interface_v4), this reflects what
+    /// the socket layer actually achieved: an interface appears only once
+    /// its send socket was created and the multicast group joined, and
+    /// requests that fail (e.g. a nonexistent index) never show up.
+    /// Additions and removals are processed asynchronously, so a request is
+    /// not visible here until the discovery actor has handled it.
+    ///
+    /// An empty set means per-interface multicast is not in use; mDNS then
+    /// runs on the OS default interface only.
+    pub fn multicast_interfaces_v4(&self) -> BTreeSet<u32> {
+        self.interfaces_v4.borrow().clone()
+    }
+
+    /// Subscribe to changes of the actively advertising interface set.
+    ///
+    /// See [`multicast_interfaces_v4`](DropGuard::multicast_interfaces_v4)
+    /// for the semantics of the value. Use [`watch::Receiver::borrow`] for a
+    /// snapshot and [`watch::Receiver::changed`] to await updates; the
+    /// channel closes when the discovery service stops.
+    pub fn subscribe_multicast_interfaces_v4(&self) -> watch::Receiver<BTreeSet<u32>> {
+        self.interfaces_v4.clone()
     }
 }
 
@@ -606,5 +636,42 @@ mod tests {
 
         // Stop the discoverers
         drop(guard1);
+    }
+
+    #[tokio::test]
+    async fn test_multicast_interfaces_watch() {
+        let handle = tokio::runtime::Handle::current();
+        let lo_idx = loopback_ifindex();
+
+        let guard = Discoverer::new("watch_service".to_string(), "watch_peer".to_string())
+            .with_addrs(8100, vec![IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))])
+            .with_multicast_interfaces_v4(vec![lo_idx])
+            .spawn(&handle)
+            .expect("Failed to spawn discoverer");
+
+        // The initial set reflects the interfaces registered at spawn.
+        let mut rx = guard.subscribe_multicast_interfaces_v4();
+        assert_eq!(guard.multicast_interfaces_v4(), BTreeSet::from([lo_idx]));
+
+        // Removing the interface publishes an empty set once the actor has
+        // processed the request.
+        guard.remove_interface_v4(lo_idx);
+        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+            .await
+            .expect("timed out waiting for interface removal")
+            .expect("interface watch closed");
+        assert!(rx.borrow().is_empty());
+
+        // A nonexistent interface index fails inside the actor and must never
+        // appear. The actor processes requests in order, so once the
+        // subsequent loopback re-add is visible, the failed request has
+        // provably been handled and skipped.
+        guard.add_interface_v4(999_999);
+        guard.add_interface_v4(lo_idx);
+        tokio::time::timeout(Duration::from_secs(5), rx.changed())
+            .await
+            .expect("timed out waiting for interface re-add")
+            .expect("interface watch closed");
+        assert_eq!(*rx.borrow(), BTreeSet::from([lo_idx]));
     }
 }
