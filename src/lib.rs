@@ -360,7 +360,8 @@ impl Discoverer {
     }
 
     /// Set which interfaces to use for sending and receiving multicast messages,
-    /// identified by interface index (as returned by `libc::if_nametoindex`).
+    /// identified by interface index (as returned by
+    /// [`utilities::if_nametoindex`](crate::utilities::if_nametoindex)).
     ///
     /// By default (empty), multicast messages are sent only on the default interface.
     /// Provide a list of interface indices to send and receive multicast messages on
@@ -484,7 +485,8 @@ impl DropGuard {
     /// has started. Useful for systems where network interfaces may come up after
     /// the application starts.
     ///
-    /// Use `libc::if_nametoindex` to convert an interface name to an index.
+    /// Use [`utilities::if_nametoindex`](crate::utilities::if_nametoindex) to
+    /// convert an interface name to an index.
     ///
     /// Note: This only affects IPv4. IPv6 multicast always uses the default interface.
     pub fn add_interface_v4(&self, ifindex: u32) {
@@ -525,10 +527,7 @@ mod tests {
 
     /// Get the interface index for the loopback interface.
     fn loopback_ifindex() -> u32 {
-        let name = std::ffi::CString::new("lo").unwrap();
-        let idx = unsafe { libc::if_nametoindex(name.as_ptr()) };
-        assert!(idx != 0, "loopback interface 'lo' not found");
-        idx
+        crate::utilities::if_nametoindex("lo").expect("loopback interface 'lo' not found")
     }
 
     #[tokio::test]

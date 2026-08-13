@@ -1,28 +1,16 @@
 use if_addrs::get_if_addrs;
 use rand::{rng, Rng};
 use std::collections::HashSet;
-use std::ffi::CString;
 use std::{
     io::{stderr, stdin},
     net::UdpSocket,
     sync::Arc,
     time::Duration,
 };
-use swarm_discovery::Discoverer;
+use swarm_discovery::{utilities::if_nametoindex, Discoverer};
 use tokio::runtime::Builder;
 use tokio::time;
 use tracing_subscriber::{fmt, EnvFilter};
-
-/// Convert an interface name to its OS interface index.
-fn if_nametoindex(name: &str) -> Option<u32> {
-    let c_name = CString::new(name).ok()?;
-    let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
-    if idx == 0 {
-        None
-    } else {
-        Some(idx)
-    }
-}
 
 /// Get the set of non-loopback IPv4 interface indices.
 fn get_interface_indices() -> HashSet<u32> {
@@ -31,7 +19,7 @@ fn get_interface_indices() -> HashSet<u32> {
         .into_iter()
         .filter(|iface| !iface.is_loopback())
         .filter(|iface| iface.addr.ip().is_ipv4())
-        .filter_map(|iface| if_nametoindex(&iface.name))
+        .filter_map(|iface| if_nametoindex(&iface.name).ok())
         .collect()
 }
 

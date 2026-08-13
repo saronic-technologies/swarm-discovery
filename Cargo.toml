@@ -19,11 +19,18 @@ acto = { version = "0.8.0", features = ["tokio"] }
 hickory-proto = "0.25.2"
 rand = "0.9.2"
 serde = { version = "1.0.228", features = ["derive"], optional = true }
-libc = "0.2"
 socket2 = { version = "0.6", features = ["all"] }
 tokio = { version = "1.49.0", features = ["macros", "net", "rt", "time"] }
 thiserror = "2"
 tracing = "0.1.44"
+
+[target.'cfg(unix)'.dependencies]
+# ip_mreqn for IP_MULTICAST_IF by interface index, and if_nametoindex.
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# if_nametoindex lives in iphlpapi on Windows; libc does not expose it there.
+windows-sys = { version = "0.61", features = ["Win32_NetworkManagement_IpHelper"] }
 
 [dev-dependencies]
 if-addrs = "0.14.0"

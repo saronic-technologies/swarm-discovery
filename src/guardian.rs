@@ -81,24 +81,14 @@ pub async fn guardian(
             ActoInput::Message(msg) => match &msg {
                 Input::AddInterface(ifindex) => {
                     if let Err(e) = sockets2.add_interface_v4(*ifindex) {
-                        tracing::warn!(
-                            "Failed to add interface index {}: {}",
-                            ifindex,
-                            e
-                        );
+                        tracing::warn!("Failed to add interface index {}: {}", ifindex, e);
                     } else {
-                        tracing::info!(
-                            "Added send-only socket for interface index {}",
-                            ifindex
-                        );
+                        tracing::info!("Added send-only socket for interface index {}", ifindex);
                     }
                 }
                 Input::RemoveInterface(ifindex) => {
                     sockets2.remove_interface_v4(*ifindex);
-                    tracing::info!(
-                        "Removed send-only socket for interface index {}",
-                        ifindex
-                    );
+                    tracing::info!("Removed send-only socket for interface index {}", ifindex);
                 }
                 _ => {
                     snd_ref.send(sender::MdnsMsg::Update(msg));

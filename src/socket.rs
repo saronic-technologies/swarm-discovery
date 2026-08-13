@@ -3,9 +3,7 @@ use hickory_proto::op::Message;
 use socket2::{Domain, InterfaceIndexOrAddress, Protocol, SockRef, Socket, Type};
 use std::{
     collections::HashMap,
-    mem::size_of,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4},
-    os::fd::AsRawFd,
     sync::{Arc, RwLock},
 };
 use thiserror::Error;
@@ -103,7 +101,10 @@ pub enum SocketError {
 ///
 /// `socket2::set_multicast_if_v4` only accepts an IP address, so we call
 /// `libc::setsockopt` directly to use the `imr_ifindex` field.
+#[cfg(unix)]
 fn set_multicast_if_v4_by_index(socket: &Socket, ifindex: u32) -> Result<(), SocketError> {
+    use std::{mem::size_of, os::fd::AsRawFd};
+
     let mreqn = libc::ip_mreqn {
         imr_multiaddr: libc::in_addr { s_addr: 0 },
         imr_address: libc::in_addr { s_addr: 0 },
@@ -125,6 +126,25 @@ fn set_multicast_if_v4_by_index(socket: &Socket, ifindex: u32) -> Result<(), Soc
         });
     }
     Ok(())
+}
+
+/// Set `IP_MULTICAST_IF` with an interface index.
+///
+/// Windows accepts an interface index for `IP_MULTICAST_IF` encoded as an
+/// `in_addr` in the `0.x.x.x` block, in network byte order — the same
+/// encoding socket2 itself uses for `join_multicast_v4_n` with an index
+/// (see the `IP_MREQ` docs: an index of 1 is passed as `0.0.0.1`).
+/// `Ipv4Addr::from(u32)` is big-endian, i.e. network byte order, so it
+/// produces exactly that encoding. Linux does not support this form, hence
+/// the `ip_mreqn` variant above.
+#[cfg(windows)]
+fn set_multicast_if_v4_by_index(socket: &Socket, ifindex: u32) -> Result<(), SocketError> {
+    socket
+        .set_multicast_if_v4(&Ipv4Addr::from(ifindex))
+        .map_err(|source| SocketError::SetMulticastIf {
+            domain: IP::Ipv4,
+            source,
+        })
 }
 
 /// Create a send-only socket for a specific interface (identified by index).
