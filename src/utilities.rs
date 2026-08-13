@@ -8,6 +8,12 @@ use std::io;
 ///
 /// Returns an error if the interface does not exist or the name contains a nul byte.
 ///
+/// Note for Windows: the OS resolves NDIS-style interface names (the form
+/// returned by `if_indextoname`, e.g. `"ethernet_32768"`), not adapter GUIDs
+/// or friendly names like `"Wi-Fi"`. When enumerating interfaces with a
+/// library that reports adapter GUIDs (e.g. `netdev`), pass the enumerated
+/// interface index directly instead of resolving names through this function.
+///
 /// # Example
 ///
 /// ```rust,no_run
@@ -23,10 +29,31 @@ pub fn if_nametoindex(name: &str) -> io::Result<u32> {
             "interface name contains nul byte",
         )
     })?;
-    let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
-    if idx == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(idx)
+
+    #[cfg(unix)]
+    {
+        let idx = unsafe { libc::if_nametoindex(c_name.as_ptr()) };
+        if idx == 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(idx)
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let idx = unsafe {
+            windows_sys::Win32::NetworkManagement::IpHelper::if_nametoindex(c_name.as_ptr().cast())
+        };
+        if idx == 0 {
+            // if_nametoindex is documented to return zero on failure without
+            // a reliable GetLastError, so synthesize the error.
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no interface named `{name}`"),
+            ))
+        } else {
+            Ok(idx)
+        }
     }
 }
