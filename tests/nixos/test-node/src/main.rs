@@ -1,9 +1,10 @@
+use std::collections::BTreeSet;
 use std::env;
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
 use std::net::IpAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use swarm_discovery::{Discoverer, IpClass};
@@ -29,9 +30,9 @@ fn main() {
         .init();
 
     let args: Vec<String> = env::args().collect();
-    if args.len() < 4 {
+    if args.len() < 3 {
         eprintln!(
-            "Usage: {} <peer-id> <port> <interface-name> [<interface-name>...]",
+            "Usage: {} <peer-id> <port> [<interface-name>...]",
             args[0]
         );
         std::process::exit(1);
@@ -68,12 +69,15 @@ fn main() {
         .expect("build tokio runtime");
 
     let events = events_file.clone();
-    let guard = Discoverer::new("nixtest".to_owned(), peer_id.clone())
-        .with_addrs(port, addrs)
+    let mut discoverer = Discoverer::new("nixtest".to_owned(), peer_id.clone())
         .with_ip_class(IpClass::V4Only)
         .with_multicast_interfaces_v4(iface_indices)
         .with_cadence(Duration::from_millis(500))
-        .with_response_rate(5.0)
+        .with_response_rate(5.0);
+    if !addrs.is_empty() {
+        discoverer = discoverer.with_addrs(port, addrs);
+    }
+    let guard = discoverer
         .with_callback(move |pid, peer| {
             let line = if peer.is_expiry() {
                 format!(r#"{{"event":"lost","peer_id":"{}"}}"#, pid)
@@ -95,6 +99,21 @@ fn main() {
         })
         .spawn(rt.handle())
         .expect("spawn discoverer");
+
+    // Mirror the actively advertising interface set (as confirmed by the
+    // discoverer's watch channel) into a file the test script can poll.
+    let interfaces_path = PathBuf::from(format!("/tmp/discovery-interfaces-{}", peer_id));
+    let mut interfaces_rx = guard.subscribe_multicast_interfaces_v4();
+    write_interfaces(&interfaces_path, &interfaces_rx.borrow());
+    {
+        let interfaces_path = interfaces_path.clone();
+        rt.spawn(async move {
+            while interfaces_rx.changed().await.is_ok() {
+                let set = interfaces_rx.borrow_and_update().clone();
+                write_interfaces(&interfaces_path, &set);
+            }
+        });
+    }
 
     // Signal readiness
     fs::write(&ready_path, "ready").unwrap();
@@ -122,6 +141,14 @@ fn main() {
                     let ifindex = if_nametoindex(parts[1]);
                     guard.add_interface_v4(ifindex);
                     eprintln!("Added interface {} (index {})", parts[1], ifindex);
+                }
+                Some("add_interface_index") => {
+                    // Raw index variant: lets tests request indices that do
+                    // not resolve to any interface, to verify failed
+                    // registrations never surface in the active set.
+                    let ifindex: u32 = parts[1].parse().unwrap();
+                    guard.add_interface_v4(ifindex);
+                    eprintln!("Requested interface index {}", ifindex);
                 }
                 Some("remove_interface") => {
                     let ifindex = if_nametoindex(parts[1]);
@@ -151,6 +178,22 @@ fn main() {
     });
 
     drop(guard);
+}
+
+/// Write the active interface set as a compact JSON array (e.g. `[2,3]`),
+/// atomically via rename so a concurrently polling reader never sees a
+/// partial write.
+fn write_interfaces(path: &Path, set: &BTreeSet<u32>) {
+    let content = format!(
+        "[{}]",
+        set.iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, &content).unwrap();
+    fs::rename(&tmp, path).unwrap();
 }
 
 /// Look up the IPv4 addresses assigned to the given interface names.

@@ -81,6 +81,21 @@ pkgs.testers.nixosTest {
         print(f"=== end {peer_id} ===")
 
 
+    def get_ifindex(machine, iface):
+        """OS interface index for an interface name."""
+        return int(machine.succeed(f"cat /sys/class/net/{iface}/ifindex").strip())
+
+
+    def wait_active_interfaces(machine, peer_id, indices):
+        """Wait until the node's exported watch reports exactly these
+        interface indices as actively advertising."""
+        expected = "[" + ",".join(str(i) for i in sorted(indices)) + "]"
+        machine.wait_until_succeeds(
+            f"grep -qxF '{expected}' /tmp/discovery-interfaces-{peer_id}",
+            timeout=30,
+        )
+
+
     # ============================================================
     # Phase 0: Verify network topology
     # ============================================================
@@ -125,6 +140,14 @@ pkgs.testers.nixosTest {
         a.wait_for_file("/tmp/discovery-ready-nodea")
         b.wait_for_file("/tmp/discovery-ready-nodeb")
         c.wait_for_file("/tmp/discovery-ready-nodec")
+
+        # The active-interface watch reports each node's startup set,
+        # including B's multi-homed pair.
+        wait_active_interfaces(a, "nodea", [get_ifindex(a, "eth1")])
+        wait_active_interfaces(
+            b, "nodeb", [get_ifindex(b, "eth1"), get_ifindex(b, "eth2")]
+        )
+        wait_active_interfaces(c, "nodec", [get_ifindex(c, "eth1")])
 
 
     # ============================================================
